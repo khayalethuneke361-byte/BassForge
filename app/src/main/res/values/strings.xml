@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BassForge</string>
+    <string name="title">BASSFORGE</string>
+    <string name="status_idle">Waiting for a player</string>
+    <string name="bass_knob_desc">Bass level. Drag the outer ring to change it, spin the centre.</string>
+    <string name="eq_desc">Ten band equalizer</string>
+    <string name="section_tuning">TUNING</string>
+    <string name="section_presets">PRESETS</string>
+    <string name="section_eq">EQUALIZER</string>
+    <string name="footer">Live spectrum uses Android\'s Visualizer API, which requires the audio-recording permission. BassForge never records or stores audio.</string>
+    <string name="notif_channel">Audio processing</string>
+    <string name="notif_title">BassForge is active</string>
+    <string name="notif_text">Shaping audio from supported players</string>
+    <string name="notif_stop">Stop</string>
+</resources>
