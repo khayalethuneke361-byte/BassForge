@@ -1,0 +1,227 @@
+// BassForge spinner: per-pixel render of a metal tri-spinner.
+// Signed-distance silhouette -> bevel height field -> surface normals -> environment reflections
+// (softbox lights + sky + the colour of whatever it sits on) + brushed anisotropic highlights,
+// soft contact shadow and ambient occlusion on the dish underneath.
+// Written in the AGSL / GLSL ES 1.0 common subset so the exact same source is previewed in WebGL.
+
+uniform float2 uSize;     // quad size in px
+uniform float2 uCenter;   // quad centre in px
+uniform float uAngle;     // spinner rotation (radians)
+uniform float3 uAlbedo;   // body metal colour
+uniform float3 uCap;      // anodised hub-cap colour
+uniform float3 uBase;     // colour of the dish under the spinner
+uniform float3 uSky;      // overhead ambient colour
+uniform float3 uKeyCol;
+uniform float3 uFillCol;
+uniform float3 uRimCol;
+uniform float3 uAccent;
+uniform float uKeyOn;     // 0..1 light intensities (night lights switch on)
+uniform float uFillOn;
+uniform float uRimOn;
+uniform float uDark;      // 0 light mode, 1 dark mode
+uniform float uGlow;      // 0..1 bass glow, tints reflections with the accent
+
+const float PI = 3.14159265;
+const float ARM = 0.47;       // hub -> weight distance
+const float LOBE = 0.235;     // weight lobe radius
+const float WCUT = 0.147;     // weight cut-out radius
+const float WDISC = 0.136;    // steel weight radius
+const float HUBCUT = 0.168;   // bearing cut-out radius
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+float2 foldP(float2 p) {
+  float r = length(p);
+  float a = atan(p.y, p.x) - uAngle;
+  float s = 2.0 * PI / 3.0;
+  a = mod(a + 0.5 * s, s) - 0.5 * s;
+  return r * float2(cos(a), sin(a));
+}
+
+float sdSeg(float2 p, float2 b) {
+  float h = clamp(dot(p, b) / dot(b, b), 0.0, 1.0);
+  return length(p - b * h);
+}
+
+// silhouette without cut-outs
+float dSolid(float2 p) {
+  float2 q = foldP(p);
+  float hub = length(q) - 0.225;
+  float arm = sdSeg(q, float2(ARM, 0.0)) - 0.125;
+  float lobe = length(q - float2(ARM, 0.0)) - LOBE;
+  return smin(smin(hub, arm, 0.09), lobe, 0.11);
+}
+
+// body with weight + bearing cut-outs
+float dBody(float2 p) {
+  float2 q = foldP(p);
+  float d = dSolid(p);
+  float cutW = length(q - float2(ARM, 0.0)) - WCUT;
+  float cutH = length(p) - HUBCUT;
+  return max(d, -min(cutW, cutH));
+}
+
+// height profile of a bevelled plate, d = signed distance (negative inside)
+float bevelH(float d, float w, float hgt) {
+  float t = clamp(-d / w, 0.0, 1.0);
+  return hgt * sqrt(max(1.0 - (1.0 - t) * (1.0 - t), 0.0));
+}
+
+float bodyH(float d) {
+  return bevelH(d, 0.034, 0.030);
+}
+
+float3 envMap(float3 R) {
+  float up = clamp(R.z, 0.0, 1.0);
+  float3 horizon = mix(uBase * 0.55, uAccent * 0.9, 0.34 * uGlow);
+  float3 col = mix(horizon, uSky, smoothstep(0.05, 0.9, up));
+  float3 kd = normalize(float3(-0.55, -0.62, 0.56));
+  float3 fd = normalize(float3(0.88, 0.05, 0.42));
+  float3 rd = normalize(float3(0.12, 0.92, 0.32));
+  col += uKeyCol * uKeyOn * pow(max(dot(R, kd), 0.0), 5.0) * 1.15;
+  col += uFillCol * uFillOn * pow(max(dot(R, fd), 0.0), 4.0) * 0.85;
+  col += uRimCol * uRimOn * pow(max(dot(R, rd), 0.0), 6.0) * 0.95;
+  return col;
+}
+
+// brushed (circular grain) anisotropic highlight from one light
+float aniso(float3 N, float2 p, float3 L) {
+  float rr = length(p) + 0.0001;
+  float3 T = float3(-p.y / rr, p.x / rr, 0.0);
+  float3 B = float3(p.x / rr, p.y / rr, 0.0);
+  float3 H = normalize(L + float3(0.0, 0.0, 1.0));
+  float ht = dot(H, T);
+  float hb = dot(H, B);
+  float hn = max(dot(H, N), 0.2);
+  float ax = 0.60;
+  float ay = 0.20;
+  return exp(-((ht * ht) / (ax * ax) + (hb * hb) / (ay * ay)) / (hn * hn));
+}
+
+float hash(float n) { return fract(sin(n * 127.1) * 43758.5453); }
+
+float3 metal(float3 N, float2 p, float3 albedo, float brushed, float polish) {
+  float3 R = reflect(float3(0.0, 0.0, -1.0), N);
+  float3 Rp = normalize(R + float3(p * 0.60, 0.0));
+  float3 e = envMap(Rp);
+  float fres = pow(1.0 - clamp(N.z, 0.0, 1.0), 2.0);
+  float expo = mix(0.86, 1.0, uDark);
+  float3 col = albedo * (0.14 + 0.95 * expo * e);
+  col += (0.35 + 0.65 * albedo) * e * expo * (0.30 * fres + 0.12 * polish);
+  // brushed highlights
+  float3 kd = normalize(float3(-0.55, -0.62, 0.56));
+  float3 fd = normalize(float3(0.88, 0.05, 0.42));
+  float3 rd = normalize(float3(0.12, 0.92, 0.32));
+  float an = aniso(N, p, kd) * uKeyOn;
+  float af = aniso(N, p, fd) * uFillOn;
+  float ar = aniso(N, p, rd) * uRimOn;
+  col += brushed * 0.30 * (uKeyCol * an + uFillCol * af + uRimCol * ar) * (0.5 + 0.5 * albedo);
+  // grain
+  float rr = length(p);
+  float grain = hash(floor(rr * 520.0)) - 0.5;
+  col *= 1.0 + brushed * 0.07 * grain;
+  return 1.0 - exp(-col * 1.55);
+}
+
+float4 over(float4 src, float4 dst) {
+  return src + dst * (1.0 - src.a);
+}
+
+half4 main(float2 fragCoord) {
+  float Q = 0.5 * uSize.x;
+  float2 p = (fragCoord - uCenter) / Q;
+  float px = 1.0 / Q;
+  float aa = 1.1 * px;
+  float eps = 0.0035;
+
+  float4 outc = float4(0.0);
+
+  // ---- shadow + ambient occlusion on the dish ----
+  float2 so = float2(0.030, 0.062);
+  float dsh = dSolid(p - so);
+  float shadow = (1.0 - smoothstep(-0.03, 0.115, dsh)) * mix(0.50, 0.70, uDark);
+  float ao = (1.0 - smoothstep(0.0, 0.055, dSolid(p))) * mix(0.30, 0.45, uDark);
+  float sA = clamp(max(shadow, ao), 0.0, 0.85);
+  outc = float4(0.0, 0.0, 0.0, sA);
+
+  // ---- cut-out wells (dark, see the dish underneath) ----
+  float2 q = foldP(p);
+  float wellD = min(length(q - float2(ARM, 0.0)) - WCUT, length(p) - HUBCUT);
+  float wellA = 1.0 - smoothstep(-aa, aa, wellD);
+  outc = over(float4(float3(0.015, 0.02, 0.03) * wellA * 0.92, wellA * 0.92), outc);
+
+  // ---- body ----
+  float db = dBody(p);
+  float covB = 1.0 - smoothstep(-aa, aa, db);
+  if (covB > 0.001) {
+    float h0 = bodyH(db);
+    float2 gd = float2(dBody(p + float2(eps, 0.0)) - db, dBody(p + float2(0.0, eps))) / eps;
+    float hx = bodyH(db + 0.0015);
+    float hm = bodyH(db - 0.0015);
+    float dHdD = (hx - hm) / 0.003;
+    float3 N = normalize(float3(-dHdD * gd * 1.0, 1.0));
+    // gentle brushed micro relief
+    float3 col = metal(N, p, uAlbedo, 1.0, 0.2);
+    // darken toward the cut-outs a touch (depth)
+    float inner = smoothstep(0.0, 0.05, -db);
+    col *= mix(0.78, 1.0, inner);
+    outc = over(float4(col * covB, covB), outc);
+  }
+
+  // ---- steel weights ----
+  float2 wc = q - float2(ARM, 0.0);
+  float rw = length(wc);
+  float dw = rw - WDISC;
+  float covW = 1.0 - smoothstep(-aa, aa, dw);
+  if (covW > 0.001) {
+    float2 rh = wc / (rw + 0.0001);
+    float hb = bevelH(dw, 0.022, 0.020);
+    float hb2 = bevelH(dw + 0.0015, 0.022, 0.020);
+    float hb1 = bevelH(dw - 0.0015, 0.022, 0.020);
+    float slope = (hb2 - hb1) / 0.003;
+    float rings = 0.045 * sin(rw * 260.0);
+    float dimple = -0.55 * smoothstep(0.075, 0.0, rw);
+    float3 N = normalize(float3(-rh * (slope + rings + dimple * rw * 4.0), 1.0));
+    // rotate the weight's local frame back to world for reflections
+    float3 col = metal(N, p, float3(0.80, 0.82, 0.86), 0.0, 1.0);
+    col *= 0.78 + 0.22 * smoothstep(0.0, 0.07, rw);
+    outc = over(float4(col * covW, covW), outc);
+  }
+
+  // ---- bearing race ring ----
+  float rp = length(p);
+  float dr = abs(rp - 0.140) - 0.024;
+  float covR = 1.0 - smoothstep(-aa, aa, dr);
+  if (covR > 0.001) {
+    float2 rh = p / (rp + 0.0001);
+    float sgn = rp > 0.140 ? 1.0 : -1.0;
+    float t = clamp(-dr / 0.016, 0.0, 1.0);
+    float slope = sgn * (1.0 - t) * 1.6;
+    float3 N = normalize(float3(rh * slope, 1.0));
+    float3 col = metal(N, p, float3(0.86, 0.88, 0.92), 0.0, 1.0);
+    outc = over(float4(col * covR, covR), outc);
+  }
+
+  // ---- anodised hub cap ----
+  float dc = rp - 0.116;
+  float covC = 1.0 - smoothstep(-aa, aa, dc);
+  if (covC > 0.001) {
+    float2 rh = p / (rp + 0.0001);
+    float t = clamp(-dc / 0.014, 0.0, 1.0);
+    float edge = (1.0 - t) * 1.4;
+    float dome = 0.55 * (rp / 0.116);
+    float3 N = normalize(float3(rh * (edge + dome * 0.35), 1.0));
+    float3 col = metal(N, p, uCap, 1.0, 0.5);
+    // centre dimple
+    col *= 1.0 - 0.35 * smoothstep(0.034, 0.0, rp);
+    // index mark that rotates with the body
+    float2 mk = float2(cos(uAngle), sin(uAngle)) * 0.076;
+    col = mix(col, float3(0.02, 0.03, 0.05), 0.85 * (1.0 - smoothstep(0.010, 0.017, length(p - mk))));
+    outc = over(float4(col * covC, covC), outc);
+  }
+
+  return half4(clamp(outc, 0.0, 1.0));
+}
